@@ -1,0 +1,20 @@
+name:                dns-forwarder
+version:             0.1.0.0
+synopsis:            A DNS proxy
+license:             BSD3
+license-file:        LICENSE
+author:              Anatoly Zaretsky
+maintainer:          anatoly.zaretsky@gmail.com
+copyright:           (c) 2020, Anatoly Zaretsky 
+category:            Network
+build-type:          Simple
+extra-source-files:  CHANGELOG.md
+cabal-version:       >=1.10
+
+executable dns-forwarder
+  main-is:             Main.hs
+  ghc-options:         -Wall
+  ld-options:          -s
+  build-depends:       base >=4.12 && <4.13, network >=2.8 && <2.9
+  hs-source-dirs:      src
+  default-language:    Haskell2010
