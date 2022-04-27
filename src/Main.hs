@@ -2,11 +2,11 @@ module Main (main) where
 
 import Control.Concurrent
 import Control.Exception (bracket)
-import Control.Monad (forever, when)
+import Control.Monad (forever, void, when)
 import qualified Data.ByteString as B
 import qualified Data.Map as M
 import Data.Word (Word8, Word32)
-import Foreign
+import Foreign hiding (void)
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString (send, sendTo, recv, recvFrom)
 import System.Environment (getArgs)
@@ -31,56 +31,53 @@ simple bindHost bindService targetHost targetService = do
     targetAI <- lookupAddress targetHost targetService
     withBoundSocketForAddress bindAI $ \serverSocket -> forever $ do
         (request, clientAddress) <- recvFrom serverSocket maxDatagramSize
-        forkIO $ withConnectedSocketForAddress targetAI $ \targetSocket -> do
-            _ <- send targetSocket request
+        forkIO_ $ withConnectedSocketForAddress targetAI $ \targetSocket -> do
+            void $ send targetSocket request
             response <- recv targetSocket maxDatagramSize
-            _ <- sendTo serverSocket response clientAddress
+            void $ sendTo serverSocket response clientAddress
             return ()
 
-headerLength :: Int
-headerLength = 6
-
-withHeaderBuf :: (Ptr () -> IO ()) -> IO ()
-withHeaderBuf = allocaBytes headerLength
+data Task = Submit B.ByteString SockAddr | Dispatch Word32 B.ByteString
 
 receiver :: HostName -> ServiceName -> IO ()
 receiver bindHost bindService = do
     bindAI <- lookupAddress bindHost bindService
-    conts <- newMVar M.empty
-    requests <- newChan
-    let submitLoop requestId buf = do
-            (request, cont) <- readChan requests
-            modifyMVar_ conts $ return . M.insert requestId cont
-            submitPdu buf requestId request
-            submitLoop (requestId + 1) buf
-    _ <- forkIO $ withHeaderBuf $ submitLoop 0
-    _ <- forkIO $ withHeaderBuf $ \buf -> forever $ do
-        (responseId, response) <- receivePdu buf
-        maybeCont <- modifyMVar conts $ \m -> (\(c, m') -> return (m', c)) $ M.updateLookupWithKey (\_ _ -> Nothing) responseId m
-        case maybeCont of
-            Nothing -> hPutStrLn stderr ("unknown response id " ++ show responseId)
-            Just cont -> forkIO (cont response) >> return ()
-    withBoundSocketForAddress bindAI $ \serverSocket -> forever $ do
-        (request, clientAddress) <- recvFrom serverSocket maxDatagramSize
-        writeChan requests (request, \response -> sendTo serverSocket response clientAddress >> return ())
+    withBoundSocketForAddress bindAI $ \serverSocket -> do
+        submitRequest <- spawnSubmitter
+        tasks <- newChan
+        let processTasks requestId addrs = do
+                task <- readChan tasks
+                case task of
+                    Submit request clientAddress -> do
+                        submitRequest requestId request
+                        processTasks (requestId + 1) (M.insert requestId clientAddress addrs)
+                    Dispatch responseId response -> do
+                        let (c, addrs') = M.updateLookupWithKey (\_ _ -> Nothing) responseId addrs
+                        case c of
+                            Nothing -> hPutStrLn stderr ("unknown response id " ++ show responseId)
+                            Just clientAddress -> forkIO_ $ void $ sendTo serverSocket response clientAddress
+                        processTasks requestId addrs'
+        forkIO_ $ processTasks 0 M.empty
+        forkIO_ $ pullPdus $ \responseId response -> writeChan tasks $ Dispatch responseId response
+        forever $ do
+            (request, clientAddress) <- recvFrom serverSocket maxDatagramSize
+            writeChan tasks $ Submit request clientAddress
 
 transmitter :: HostName -> ServiceName -> IO ()
 transmitter targetHost targetService = do
     targetAI <- lookupAddress targetHost targetService
-    responses <- newChan
-    _ <- forkIO $ withHeaderBuf $ \buf -> forever $ do
-        (requestId, response) <- readChan responses
-        submitPdu buf requestId response
-    withHeaderBuf $ \buf ->
-        forever $ do
-            (requestId, request) <- receivePdu buf
-            forkIO $ withConnectedSocketForAddress targetAI $ \targetSocket -> do
-                _ <- send targetSocket request
-                response <- recv targetSocket maxDatagramSize
-                writeChan responses (requestId, response)
+    submitResponse <- spawnSubmitter
+    pullPdus $ \requestId request ->
+        forkIO_ $ withConnectedSocketForAddress targetAI $ \targetSocket -> do
+            void $ send targetSocket request
+            response <- recv targetSocket maxDatagramSize
+            submitResponse requestId response
 
-receivePdu :: Ptr () -> IO (Word32, B.ByteString)
-receivePdu buf = do
+headerLength :: Int
+headerLength = 6
+
+pullPdus :: (Word32 -> B.ByteString -> IO ()) -> IO ()
+pullPdus handler = allocaBytes headerLength $ \buf -> forever $ do
     headerSize <- hGetBuf stdin buf headerLength
     when (headerSize < headerLength) $ fail "end of input"
     pduId <- peek (castPtr buf)
@@ -89,17 +86,24 @@ receivePdu buf = do
     let pduLength = fromIntegral lenHigh `shiftL` 8 .|. fromIntegral lenLow
     pdu <- B.hGet stdin pduLength
     when (B.length pdu < pduLength) $ fail "truncated pdu"
-    return (pduId, pdu)
+    handler pduId pdu
 
-submitPdu :: Ptr () -> Word32 -> B.ByteString -> IO ()
-submitPdu buf pduId pdu = do
-    poke (castPtr buf) pduId
-    let pduLength = B.length pdu
-    poke (plusPtr buf 4) (fromIntegral (pduLength `shiftR` 8 .&. 0xff) :: Word8)
-    poke (plusPtr buf 5) (fromIntegral (pduLength .&. 0xff) :: Word8)
-    hPutBuf stdout buf headerLength
-    B.hPut stdout pdu
-    hFlush stdout
+spawnSubmitter :: IO (Word32 -> B.ByteString -> IO ())
+spawnSubmitter = do
+    chan <- newChan
+    forkIO_ $ allocaBytes headerLength $ \buf -> forever $ do
+        (pduId, pdu) <- readChan chan
+        poke (castPtr buf) pduId
+        let pduLength = B.length pdu
+        poke (plusPtr buf 4) (fromIntegral (pduLength `shiftR` 8 .&. 0xff) :: Word8)
+        poke (plusPtr buf 5) (fromIntegral (pduLength .&. 0xff) :: Word8)
+        hPutBuf stdout buf headerLength
+        B.hPut stdout pdu
+        hFlush stdout
+    return $ curry (writeChan chan)
+
+forkIO_ :: IO () -> IO ()
+forkIO_ = void . forkIO
 
 lookupAddress :: HostName -> ServiceName -> IO AddrInfo
 lookupAddress host service = do
