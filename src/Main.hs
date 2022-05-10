@@ -30,9 +30,8 @@ simple bindHost bindService targetHost targetService = do
     targetAI <- lookupAddress targetHost targetService
     withBoundSocketForAddress bindAI $ \serverSocket -> forever $ do
         (request, clientAddress) <- recvFrom serverSocket maxDatagramSize
-        forkIO_ $ withConnectedSocketForAddress targetAI $ \targetSocket -> do
-            void $ send targetSocket request
-            response <- recv targetSocket maxDatagramSize
+        forkIO_ $ do
+            response <- query targetAI request
             void $ sendTo serverSocket response clientAddress
             return ()
 
@@ -67,10 +66,13 @@ transmitter targetHost targetService = do
     targetAI <- lookupAddress targetHost targetService
     submitResponse <- spawnSubmitter
     pullPdus $ \requestId request ->
-        forkIO_ $ withConnectedSocketForAddress targetAI $ \targetSocket -> do
-            void $ send targetSocket request
-            response <- recv targetSocket maxDatagramSize
-            submitResponse requestId response
+        forkIO_ $ query targetAI request >>= submitResponse requestId
+
+query :: AddrInfo -> B.ByteString -> IO B.ByteString
+query targetAI request = withSocketForAddress targetAI $ \targetSocket -> do
+    connect targetSocket (addrAddress targetAI)
+    void $ send targetSocket request
+    recv targetSocket maxDatagramSize
 
 headerLength :: Int
 headerLength = 6
@@ -111,15 +113,10 @@ lookupAddress host service = do
         [] -> fail ("could not obtain address information for host " ++ host ++ " and service " ++ service)
         (ai : _) -> return ai
 
-withSocketForAddress :: AddrInfo -> (Socket -> IO ()) -> IO ()
+withSocketForAddress :: AddrInfo -> (Socket -> IO a) -> IO a
 withSocketForAddress ai f = bracket (socket (addrFamily ai) (addrSocketType ai) (addrProtocol ai)) close f
 
 withBoundSocketForAddress :: AddrInfo -> (Socket -> IO ()) -> IO ()
 withBoundSocketForAddress ai f = withSocketForAddress ai $ \s -> do
     bind s (addrAddress ai)
-    f s
-
-withConnectedSocketForAddress :: AddrInfo -> (Socket -> IO ()) -> IO ()
-withConnectedSocketForAddress ai f = withSocketForAddress ai $ \s -> do
-    connect s (addrAddress ai)
     f s
