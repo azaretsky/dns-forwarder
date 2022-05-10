@@ -5,9 +5,8 @@ import Control.Exception (bracket)
 import Control.Monad (forever, void, when)
 import qualified Data.ByteString as B
 import qualified Data.Map as M
-import Data.Word (Word8, Word32)
 import Foreign hiding (void)
-import Network.Socket hiding (send, sendTo, recv, recvFrom)
+import Network.Socket
 import Network.Socket.ByteString (send, sendTo, recv, recvFrom)
 import System.Environment (getArgs)
 import System.IO
