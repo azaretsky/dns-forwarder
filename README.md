@@ -1,6 +1,6 @@
 The forwarder will listen for UDP DNS requests on
 one statically configured address, forward them to
-another statically configured address, receive resonses
+another statically configured address, receive responses
 and send them back to the corresponding original
 requesting parties.
 
